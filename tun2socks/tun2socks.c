@@ -1179,7 +1179,9 @@ int process_device_udp_packet (uint8_t *data, int data_len)
 
             if (is_dns)
 				  {//change DNS port to 5400 for Orbot Tor access
-			  BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address,hton16(5400));
+
+            	BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address,udp_header.dest_port);
+            	//BAddr_InitIPv4(&remote_addr, ipv4_header.source_address,hton16(5400));
 
 				  }
 			  else
