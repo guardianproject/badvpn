@@ -118,6 +118,9 @@ static void BLog_ChannelContextLog (BLogChannelContext ccontext, int level, cons
 void BLog_InitStdout (void);
 void BLog_InitStderr (void);
 
+// PSIPHON
+void BLog_InitPsiphon (void);
+
 int BLogGlobal_GetChannelByName (const char *channel_name)
 {
     int i;

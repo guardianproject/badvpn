@@ -90,6 +90,7 @@
     BReactor_Synchronize(&ss, &sync_mark.base); \
     BPending_Free(&sync_mark);
 
+
 // command-line options
 struct {
     int help;
@@ -281,6 +282,7 @@ void PsiphonLog(const char *levelStr, const char *channelStr, const char *msgStr
     (*g_env)->DeleteLocalRef(g_env, msg);
 }
 
+// org.torproject.android.vpn.Tun2Socks.runTun2Socks
 JNIEXPORT jint JNICALL Java_org_torproject_android_vpn_Tun2Socks_runTun2Socks(
     JNIEnv* env,
     jclass cls,
@@ -299,7 +301,7 @@ JNIEXPORT jint JNICALL Java_org_torproject_android_vpn_Tun2Socks_runTun2Socks(
     const char* socksServerAddressStr = (*env)->GetStringUTFChars(env, socksServerAddress, 0);
     const char* udpgwServerAddressStr = (*env)->GetStringUTFChars(env, udpgwServerAddress, 0);
 
-    init_arguments("Orbot tun2socks");
+    init_arguments("Drobot tun2socks");
 
     options.netif_ipaddr = (char*)vpnIpAddressStr;
     options.netif_netmask = (char*)vpnNetMaskStr;
@@ -309,9 +311,9 @@ JNIEXPORT jint JNICALL Java_org_torproject_android_vpn_Tun2Socks_runTun2Socks(
     options.tun_fd = vpnInterfaceFileDescriptor;
     options.tun_mtu = vpnInterfaceMTU;
     options.set_signal = 0;
-    options.loglevel = 2;
+    options.loglevel = 4;
 
-    //BLog_InitPsiphon();
+    BLog_InitPsiphon();
 
     run();
 
@@ -429,7 +431,7 @@ void run()
         goto fail4;
     }
     
-    if (options.udpgw_remote_server_addr) {
+    if (options.udpgw_remote_server_addr && !options.udpgw_transparent_dns) {
         // compute maximum UDP payload size we need to pass through udpgw
         udp_mtu = BTap_GetMTU(&device) - (int)(sizeof(struct ipv4_header) + sizeof(struct udp_header));
         if (options.netif_ip6addr) {
@@ -533,7 +535,7 @@ void run()
     BFree(device_write_buf);
 fail5:
     BPending_Free(&lwip_init_job);
-    if (options.udpgw_remote_server_addr) {
+    if (options.udpgw_remote_server_addr && !options.udpgw_transparent_dns) {
         SocksUdpGwClient_Free(&udpgw_client);
     }
 fail4a:
@@ -1094,6 +1096,12 @@ void device_read_handler_send (void *unused, uint8_t *data, int data_len)
     // accept packet
     PacketPassInterface_Done(&device_read_interface);
     
+    // process DNS directly
+    if (process_device_dns_packet(data, data_len)) {
+    	BLog(BLOG_INFO, "end processing dns packet");
+    	return;
+    }
+
     // process UDP directly
     if (process_device_udp_packet(data, data_len)) {
         return;
@@ -1120,12 +1128,146 @@ void device_read_handler_send (void *unused, uint8_t *data, int data_len)
     }
 }
 
+int process_device_dns_packet (uint8_t *data, int data_len)
+{
+    ASSERT(data_len >= 0)
+
+    // do nothing if we don't have dnsgw
+    if (!options.udpgw_remote_server_addr || !options.udpgw_transparent_dns) {
+    	BLog(BLOG_WARNING, "No dnsgw to process dns packet");
+    	goto fail;
+    }
+
+    static BAddr local_addr;
+    static BAddr remote_addr;
+    static int init = 0;
+
+    int to_dns;
+    int from_dns;
+    int packet_length = 0;
+
+    uint8_t ip_version = 0;
+    if (data_len > 0) {
+        ip_version = (data[0] >> 4);
+    }
+
+    switch (ip_version) {
+        case 4: {
+            // ignore non-UDP packets
+            if (data_len < sizeof(struct ipv4_header) || data[offsetof(struct ipv4_header, protocol)] != IPV4_PROTOCOL_UDP) {
+                goto fail;
+            }
+
+            // parse IPv4 header
+            struct ipv4_header ipv4_header;
+            if (!ipv4_check(data, data_len, &ipv4_header, &data, &data_len)) {
+                goto fail;
+            }
+
+            // parse UDP
+            struct udp_header udp_header;
+            if (!udp_check(data, data_len, &udp_header, &data, &data_len)) {
+                goto fail;
+            }
+
+            // verify UDP checksum
+            uint16_t checksum_in_packet = udp_header.checksum;
+            udp_header.checksum = 0;
+            uint16_t checksum_computed = udp_checksum(&udp_header, data, data_len, ipv4_header.source_address, ipv4_header.destination_address);
+            if (checksum_in_packet != checksum_computed) {
+                goto fail;
+            }
+
+            // to port 53 is considered a DNS packet
+            to_dns = udp_header.dest_port == hton16(53);
+
+            // from port 8153 is considered a DNS packet
+            from_dns = udp_header.source_port == udpgw_remote_server_addr.ipv4.port;
+
+            // if not DNS packet, just bypass it.
+            if (!to_dns && !from_dns) {
+            	BLog(BLOG_WARNING, "No to_dns and from_dns packet: bypass");
+            	goto fail;
+            }
+
+            // modify DNS packet
+            if (to_dns) {
+                BLog(BLOG_INFO, "UDP: to DNS %d bytes", data_len);
+
+                // construct addresses
+                if (!init) {
+                    init = 1;
+                    BAddr_InitIPv4(&local_addr, ipv4_header.source_address, udp_header.source_port);
+                    BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address, udp_header.dest_port);
+                }
+
+                // build IP header
+                ipv4_header.destination_address = udpgw_remote_server_addr.ipv4.ip;
+                ipv4_header.source_address = netif_ipaddr.ipv4;
+
+                // build UDP header
+                udp_header.dest_port = udpgw_remote_server_addr.ipv4.port;
+
+            } else if (from_dns) {
+
+                // if not initialized
+                if (!init) {
+                    goto fail;
+                }
+
+                BLog(BLOG_INFO, "UDP: from DNS %d bytes", data_len);
+
+                // build IP header
+                ipv4_header.source_address = remote_addr.ipv4.ip;
+                ipv4_header.destination_address = local_addr.ipv4.ip;
+
+                // build UDP header
+                udp_header.source_port = remote_addr.ipv4.port;
+
+            }
+
+            // update IPv4 header's checksum
+            ipv4_header.checksum = hton16(0);
+            ipv4_header.checksum = ipv4_checksum(&ipv4_header, NULL, 0);
+
+            // update UDP header's checksum
+            udp_header.checksum = hton16(0);
+            udp_header.checksum = udp_checksum(&udp_header, data, data_len,
+                    ipv4_header.source_address, ipv4_header.destination_address);
+
+            // write packet
+            memcpy(device_write_buf, &ipv4_header, sizeof(ipv4_header));
+            memcpy(device_write_buf + sizeof(ipv4_header), &udp_header, sizeof(udp_header));
+            memcpy(device_write_buf + sizeof(ipv4_header) + sizeof(udp_header), data, data_len);
+            packet_length = sizeof(ipv4_header) + sizeof(udp_header) + data_len;
+
+        } break;
+
+        case 6: {
+            // TODO: support IPv6 DNS Gateway
+            goto fail;
+        } break;
+
+        default: {
+            goto fail;
+        } break;
+    }
+
+    // submit packet
+    BTap_Send(&device, device_write_buf, packet_length);
+
+    return 1;
+
+fail:
+    return 0;
+}
+
 int process_device_udp_packet (uint8_t *data, int data_len)
 {
     ASSERT(data_len >= 0)
     
     // do nothing if we don't have udpgw
-    if (!options.udpgw_remote_server_addr) {
+    if (!options.udpgw_remote_server_addr || options.udpgw_transparent_dns) {
         goto fail;
     }
     
