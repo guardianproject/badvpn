@@ -1091,14 +1091,14 @@ void device_read_handler_send (void *unused, uint8_t *data, int data_len)
     ASSERT(!quitting)
     ASSERT(data_len >= 0)
     
-    BLog(BLOG_DEBUG, "device: received packet");
+    //BLog(BLOG_DEBUG, "device: received packet");
     
     // accept packet
     PacketPassInterface_Done(&device_read_interface);
     
     // process DNS directly
     if (process_device_dns_packet(data, data_len)) {
-    	BLog(BLOG_INFO, "end processing dns packet");
+    	//BLog(BLOG_INFO, "end processing dns packet");
     	return;
     }
 
@@ -1186,13 +1186,13 @@ int process_device_dns_packet (uint8_t *data, int data_len)
 
             // if not DNS packet, just bypass it.
             if (!to_dns && !from_dns) {
-            	BLog(BLOG_WARNING, "No to_dns and from_dns packet: bypass");
+            	//BLog(BLOG_WARNING, "No to_dns and from_dns packet: bypass");
             	goto fail;
             }
 
             // modify DNS packet
             if (to_dns) {
-                BLog(BLOG_INFO, "UDP: to DNS %d bytes", data_len);
+                //BLog(BLOG_INFO, "UDP: to DNS %d bytes", data_len);
 
                 // construct addresses
                 if (!init) {
@@ -1215,7 +1215,7 @@ int process_device_dns_packet (uint8_t *data, int data_len)
                     goto fail;
                 }
 
-                BLog(BLOG_INFO, "UDP: from DNS %d bytes", data_len);
+                //BLog(BLOG_INFO, "UDP: from DNS %d bytes", data_len);
 
                 // build IP header
                 ipv4_header.source_address = remote_addr.ipv4.ip;
@@ -1307,7 +1307,7 @@ int process_device_udp_packet (uint8_t *data, int data_len)
                 goto fail;
             }
             
-            BLog(BLOG_INFO, "UDP: from device %d bytes", data_len);
+            //BLog(BLOG_INFO, "UDP: from device %d bytes", data_len);
             
             // construct addresses
             BAddr_InitIPv4(&local_addr, ipv4_header.source_address, udp_header.source_port);
@@ -1365,7 +1365,7 @@ int process_device_udp_packet (uint8_t *data, int data_len)
                 goto fail;
             }
             
-            BLog(BLOG_INFO, "UDP/IPv6: from device %d bytes", data_len);
+            //BLog(BLOG_INFO, "UDP/IPv6: from device %d bytes", data_len);
             
             // construct addresses
             BAddr_InitIPv6(&local_addr, ipv6_header.source_address, udp_header.source_port);
@@ -1486,7 +1486,7 @@ void client_logfunc (struct tcp_client *client)
     char remote_addr_s[BADDR_MAX_PRINT_LEN];
     BAddr_Print(&client->remote_addr, remote_addr_s);
     
-    BLog_Append("%05d (%s %s): ", num_clients, local_addr_s, remote_addr_s);
+    //BLog_Append("%05d (%s %s): ", num_clients, local_addr_s, remote_addr_s);
 }
 
 void client_log (struct tcp_client *client, int level, const char *fmt, ...)
@@ -1576,7 +1576,7 @@ err_t listener_accept_func (void *arg, struct tcp_pcb *newpcb, err_t err)
     client->socks_up = 0;
     client->socks_closed = 0;
     
-    client_log(client, BLOG_INFO, "accepted");
+    //client_log(client, BLOG_INFO, "accepted");
     
     DEAD_ENTER(client->dead_client)
     SYNC_COMMIT
