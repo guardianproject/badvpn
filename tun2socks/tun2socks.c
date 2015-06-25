@@ -559,7 +559,7 @@ void terminate (void)
 {
     ASSERT(!quitting)
     
-    BLog(BLOG_NOTICE, "tearing down");
+    //BLog(BLOG_NOTICE, "tearing down");
     
     // set quitting
     quitting = 1;
