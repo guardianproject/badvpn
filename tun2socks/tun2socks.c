@@ -147,6 +147,87 @@ struct tcp_client {
     int socks_recv_tcp_pending;
 };
 
+#include <ancillary.h>
+
+#include <sys/prctl.h>
+#include <sys/un.h>
+#include <structure/BAVL.h>
+
+BAVL connections_tree;
+typedef struct {
+    BAddr local_addr;
+    BAddr remote_addr;
+    uint16_t port;
+    int count;
+    BAVLNode connections_tree_node;
+} Connection;
+
+static int conaddr_comparator (void *unused, uint16_t *v1, uint16_t *v2)
+{
+    if (*v1 == *v2) return 0;
+    else if (*v1 > *v2) return 1;
+    else return -1;
+}
+
+static Connection * find_connection (uint16_t port)
+{
+    BAVLNode *tree_node = BAVL_LookupExact(&connections_tree, &port);
+    if (!tree_node) {
+        return NULL;
+    }
+
+    return UPPER_OBJECT(tree_node, Connection, connections_tree_node);
+}
+
+static void remove_connection (Connection *con)
+{
+    con->count -= 1;
+    if (con->count <= 0)
+    {
+        BAVL_Remove(&connections_tree, &con->connections_tree_node);
+        free(con);
+    }
+}
+
+static void insert_connection (BAddr local_addr, BAddr remote_addr, uint16_t port)
+{
+   Connection * con = find_connection(port);
+   if (con != NULL)
+       con->count += 1;
+   else
+   {
+       Connection * tmp = (Connection *)malloc(sizeof(Connection));
+       tmp->local_addr = local_addr;
+       tmp->remote_addr = remote_addr;
+       tmp->port = port;
+       tmp->count = 1;
+       BAVL_Insert(&connections_tree, &tmp->connections_tree_node, NULL);
+   }
+}
+
+static void free_connections()
+{
+    while (!BAVL_IsEmpty(&connections_tree)) {
+        Connection *con = UPPER_OBJECT(BAVL_GetLast(&connections_tree), Connection, connections_tree_node);
+        BAVL_Remove(&connections_tree, &con->connections_tree_node);
+    }
+}
+
+
+static void tcp_remove(struct tcp_pcb* pcb_list)
+{
+    struct tcp_pcb *pcb = pcb_list;
+    struct tcp_pcb *pcb2;
+
+    while(pcb != NULL)
+    {
+        pcb2 = pcb;
+        pcb = pcb->next;
+        tcp_abort(pcb2);
+    }
+}
+
+
 // IP address of netif
 BIPAddr netif_ipaddr;
 
@@ -228,6 +309,9 @@ static void tcp_timer_handler (void *unused);
 static void device_error_handler (void *unused);
 static void device_read_handler_send (void *unused, uint8_t *data, int data_len);
 static int process_device_udp_packet (uint8_t *data, int data_len);
+#ifdef ANDROID
+static int process_device_dns_packet (uint8_t *data, int data_len);
+#endif
 static err_t netif_init_func (struct netif *netif);
 static err_t netif_output_func (struct netif *netif, struct pbuf *p, ip_addr_t *ipaddr);
 static err_t netif_output_ip6_func (struct netif *netif, struct pbuf *p, ip6_addr_t *ipaddr);
@@ -301,7 +385,7 @@ JNIEXPORT jint JNICALL Java_org_torproject_android_vpn_Tun2Socks_runTun2Socks(
     const char* socksServerAddressStr = (*env)->GetStringUTFChars(env, socksServerAddress, 0);
     const char* udpgwServerAddressStr = (*env)->GetStringUTFChars(env, udpgwServerAddress, 0);
 
-    init_arguments("Drobot tun2socks");
+    init_arguments("Orbot tun2socks");
 
     options.netif_ipaddr = (char*)vpnIpAddressStr;
     options.netif_netmask = (char*)vpnNetMaskStr;
@@ -339,6 +423,7 @@ JNIEXPORT jint JNICALL Java_org_torproject_android_vpn_Tun2Socks_terminateTun2So
 
 // from tcp_helper.c
 /** Remove all pcbs on the given list. */
+/**
 static void tcp_remove(struct tcp_pcb* pcb_list)
 {
     struct tcp_pcb *pcb = pcb_list;
@@ -350,7 +435,7 @@ static void tcp_remove(struct tcp_pcb* pcb_list)
         pcb = pcb->next;
         tcp_abort(pcb2);
     }
-}
+}*/
 
 
 
@@ -452,6 +537,7 @@ void run()
         }
         
         // init udpgw client
+	/**
         if (!SocksUdpGwClient_Init(&udpgw_client, udp_mtu, DEFAULT_UDPGW_MAX_CONNECTIONS, options.udpgw_connection_buffer_size, UDPGW_KEEPALIVE_TIME,
                                    socks_server_addr, socks_auth_info, socks_num_auth_info,
                                    udpgw_remote_server_addr, UDPGW_RECONNECT_TIME, &ss, NULL, udpgw_client_handler_received
@@ -459,6 +545,7 @@ void run()
             BLog(BLOG_ERROR, "SocksUdpGwClient_Init failed");
             goto fail4a;
         }
+	*/
     }
     
     // init lwip init job
@@ -467,7 +554,7 @@ void run()
     
     // init device write buffer
     if (!(device_write_buf = (uint8_t *)BAlloc(BTap_GetMTU(&device)))) {
-        BLog(BLOG_ERROR, "BAlloc failed");
+        BLog(BLOG_ERROR, "Device Write BAlloc failed");
         goto fail5;
     }
     
@@ -525,11 +612,14 @@ void run()
     // After further testing, we found at least one TCP connection left in the
     // active list (with state SYN_RCVD). Now we're aborting the active list
     // as well, and the bound list for good measure.
-    tcp_remove(tcp_bound_pcbs);
-    tcp_remove(tcp_active_pcbs);
-    tcp_remove(tcp_tw_pcbs);
-    // ==== PSIPHON ====
     
+	#ifdef ANDROID
+		BLog(BLOG_NOTICE, "Free TCP connections");
+		tcp_remove(tcp_bound_pcbs);
+		tcp_remove(tcp_active_pcbs);
+		tcp_remove(tcp_tw_pcbs);
+		free_connections();
+	#endif
 
     BReactor_RemoveTimer(&ss, &tcp_timer);
     BFree(device_write_buf);
@@ -1088,58 +1178,57 @@ void device_error_handler (void *unused)
 
 void device_read_handler_send (void *unused, uint8_t *data, int data_len)
 {
-    ASSERT(!quitting)
-    ASSERT(data_len >= 0)
-    
-    //BLog(BLOG_DEBUG, "device: received packet");
-    
-    // accept packet
-    PacketPassInterface_Done(&device_read_interface);
-    
-    // process DNS directly
-    if (process_device_dns_packet(data, data_len)) {
-    	//BLog(BLOG_INFO, "end processing dns packet");
-    	return;
-    }
+	ASSERT(!quitting)
+	ASSERT(data_len >= 0)
 
-    // process UDP directly
-    if (process_device_udp_packet(data, data_len)) {
-        return;
-    }
-    
-    // obtain pbuf
-    if (data_len > UINT16_MAX) {
-        BLog(BLOG_WARNING, "device read: packet too large");
-        return;
-    }
-    struct pbuf *p = pbuf_alloc(PBUF_RAW, data_len, PBUF_POOL);
-    if (!p) {
-        BLog(BLOG_WARNING, "device read: pbuf_alloc failed");
-        return;
-    }
-    
-    // write packet to pbuf
-    ASSERT_FORCE(pbuf_take(p, data, data_len) == ERR_OK)
-    
-    // pass pbuf to input
-    if (netif.input(p, &netif) != ERR_OK) {
-        BLog(BLOG_WARNING, "device read: input failed");
-        pbuf_free(p);
-    }
+	BLog(BLOG_DEBUG, "device: received packet");
+
+	// accept packet
+	PacketPassInterface_Done(&device_read_interface);
+
+#ifdef ANDROID
+	// process DNS directly
+	if (process_device_dns_packet(data, data_len)) {
+		return;
+	}
+#endif
+
+	// process UDP directly
+	if (process_device_udp_packet(data, data_len)) {
+		return;
+	}
+
+	// obtain pbuf
+	if (data_len > UINT16_MAX) {
+		BLog(BLOG_WARNING, "device read: packet too large");
+		return;
+	}
+	struct pbuf *p = pbuf_alloc(PBUF_RAW, data_len, PBUF_POOL);
+	if (!p) {
+		BLog(BLOG_WARNING, "device read: pbuf_alloc failed");
+		return;
+	}
+
+	// write packet to pbuf
+	ASSERT_FORCE(pbuf_take(p, data, data_len) == ERR_OK)
+
+	// pass pbuf to input
+	if (netif.input(p, &netif) != ERR_OK) {
+		BLog(BLOG_WARNING, "device read: input failed");
+		pbuf_free(p);
+	}
 }
 
+#ifdef ANDROID
 int process_device_dns_packet (uint8_t *data, int data_len)
 {
     ASSERT(data_len >= 0)
 
     // do nothing if we don't have dnsgw
-    if (!options.udpgw_remote_server_addr || !options.udpgw_transparent_dns) {
-    	BLog(BLOG_WARNING, "No dnsgw to process dns packet");
-    	goto fail;
+    if (!options.udpgw_remote_server_addr) {
+        goto fail;
     }
 
-    static BAddr local_addr;
-    static BAddr remote_addr;
     static int init = 0;
 
     int to_dns;
@@ -1186,20 +1275,24 @@ int process_device_dns_packet (uint8_t *data, int data_len)
 
             // if not DNS packet, just bypass it.
             if (!to_dns && !from_dns) {
-            	//BLog(BLOG_WARNING, "No to_dns and from_dns packet: bypass");
-            	goto fail;
+                goto fail;
             }
 
             // modify DNS packet
             if (to_dns) {
-                //BLog(BLOG_INFO, "UDP: to DNS %d bytes", data_len);
+                BLog(BLOG_INFO, "UDP: to DNS %d bytes", data_len);
 
                 // construct addresses
                 if (!init) {
                     init = 1;
-                    BAddr_InitIPv4(&local_addr, ipv4_header.source_address, udp_header.source_port);
-                    BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address, udp_header.dest_port);
+                    BAVL_Init(&connections_tree, OFFSET_DIFF(Connection, port, connections_tree_node), (BAVL_comparator)conaddr_comparator, NULL);
                 }
+                BAddr local_addr;
+                BAddr remote_addr;
+                BAddr_InitIPv4(&local_addr, ipv4_header.source_address, udp_header.source_port);
+                BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address, udp_header.dest_port);
+
+                insert_connection(local_addr, remote_addr, udp_header.source_port);
 
                 // build IP header
                 ipv4_header.destination_address = udpgw_remote_server_addr.ipv4.ip;
@@ -1215,15 +1308,25 @@ int process_device_dns_packet (uint8_t *data, int data_len)
                     goto fail;
                 }
 
-                //BLog(BLOG_INFO, "UDP: from DNS %d bytes", data_len);
+                BLog(BLOG_INFO, "UDP: from DNS %d bytes", data_len);
 
-                // build IP header
-                ipv4_header.source_address = remote_addr.ipv4.ip;
-                ipv4_header.destination_address = local_addr.ipv4.ip;
+                Connection * con = find_connection(udp_header.dest_port);
+                if (con != NULL)
+                {
+                    // build IP header
+                    ipv4_header.source_address = con->remote_addr.ipv4.ip;
+                    ipv4_header.destination_address = con->local_addr.ipv4.ip;
 
-                // build UDP header
-                udp_header.source_port = remote_addr.ipv4.port;
+                    // build UDP header
+                    udp_header.source_port = con->remote_addr.ipv4.port;
 
+                    remove_connection(con);
+
+                }
+                else
+                {
+                    goto fail;
+                }
             }
 
             // update IPv4 header's checksum
@@ -1253,6 +1356,8 @@ int process_device_dns_packet (uint8_t *data, int data_len)
         } break;
     }
 
+    BLog(BLOG_INFO, "UDP: sending modified DNS packet out %d bytes", packet_length);
+
     // submit packet
     BTap_Send(&device, device_write_buf, packet_length);
 
@@ -1261,11 +1366,14 @@ int process_device_dns_packet (uint8_t *data, int data_len)
 fail:
     return 0;
 }
+#endif
 
 int process_device_udp_packet (uint8_t *data, int data_len)
 {
     ASSERT(data_len >= 0)
     
+    BLog(BLOG_INFO, "UDP: from device %d bytes", data_len);
+
     // do nothing if we don't have udpgw
     if (!options.udpgw_remote_server_addr || options.udpgw_transparent_dns) {
         goto fail;
@@ -1307,30 +1415,10 @@ int process_device_udp_packet (uint8_t *data, int data_len)
                 goto fail;
             }
             
-            //BLog(BLOG_INFO, "UDP: from device %d bytes", data_len);
-            
             // construct addresses
             BAddr_InitIPv4(&local_addr, ipv4_header.source_address, udp_header.source_port);
-          //  BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address, udp_header.dest_port);
+            BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address, udp_header.dest_port);
             
-            // if transparent DNS is enabled, any packet arriving at out netif
-            // address to port 53 is considered a DNS packet
-            is_dns = (options.udpgw_transparent_dns &&
-                      ipv4_header.destination_address == netif_ipaddr.ipv4 &&
-                      udp_header.dest_port == hton16(53));
-
-            if (is_dns)
-				  {//change DNS port to 5400 for Orbot Tor access
-
-            	BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address,udp_header.dest_port);
-            	//BAddr_InitIPv4(&remote_addr, ipv4_header.source_address,hton16(5400));
-
-				  }
-			  else
-				  {
-			  BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address, udp_header.dest_port);
-
-				  }
 
         } break;
         
@@ -1365,7 +1453,7 @@ int process_device_udp_packet (uint8_t *data, int data_len)
                 goto fail;
             }
             
-            //BLog(BLOG_INFO, "UDP/IPv6: from device %d bytes", data_len);
+            BLog(BLOG_INFO, "UDP/IPv6: from device %d bytes", data_len);
             
             // construct addresses
             BAddr_InitIPv6(&local_addr, ipv6_header.source_address, udp_header.source_port);

@@ -2,6 +2,8 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 
+LOCAL_STATIC_LIBRARIES := libancillary
+
 LOCAL_MODULE := tun2socks
 
 LOCAL_CFLAGS := -std=gnu99
