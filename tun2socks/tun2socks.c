@@ -1220,6 +1220,80 @@ void device_read_handler_send (void *unused, uint8_t *data, int data_len)
 }
 
 #ifdef ANDROID
+
+int check_if_allowed (uint8_t *data, int data_len)
+{
+
+    ASSERT(data_len >= 0)
+
+    static int init = 0;
+
+    int packet_length = 0;
+
+    uint8_t ip_version = 0;
+    if (data_len > 0) {
+        ip_version = (data[0] >> 4);
+    }
+
+    switch (ip_version) {
+        case 4: {
+            
+	    int protocol = 4;
+            // parse IPv4 header
+            struct ipv4_header ipv4_header;
+            if (!ipv4_check(data, data_len, &ipv4_header, &data, &data_len)) {
+                goto fail;
+            }
+
+	 // parse UDP
+            struct udp_header udp_header;
+            if (!udp_check(data, data_len, &udp_header, &data, &data_len)) {
+                goto fail;
+            }
+
+
+
+	if (!g_env)
+	    {
+		return 0;
+	    }
+	    // Note: we could cache the class and method references if log is called frequently
+
+	    jstring saddr = (*g_env)->NewStringUTF(g_env, &ipv4_header.source_address);
+	    jstring daddr = (*g_env)->NewStringUTF(g_env, &ipv4_header.destination_address);
+
+	    jclass cls = (*g_env)->FindClass(g_env, "org/torproject/android/service/vpn/Tun2Socks");
+	    jmethodID checkMethod = (*g_env)->GetStaticMethodID(g_env, cls, "checkIsAllowed", "(int;Ljava/lang/String;int;Ljava/lang/String;int;)V");
+	    jboolean jReturnValue = (*g_env)->CallStaticBooleanMethod(g_env, cls, checkMethod, protocol, saddr, udp_header.source_port, daddr, udp_header.dest_port);
+
+	    (*g_env)->DeleteLocalRef(g_env, cls);
+
+	    (*g_env)->DeleteLocalRef(g_env, saddr);
+	    (*g_env)->DeleteLocalRef(g_env, daddr);
+
+	    if (jReturnValue)
+		return 1;
+	    else
+		return 0;
+
+        } break;
+
+        case 6: {
+            // TODO: support IPv6 DNS Gateway
+          //  goto fail;
+        } break;
+
+        default: {
+            //goto fail;
+        } break;
+    }
+
+    return 1;
+
+fail:
+    return 0;
+}
+
 int process_device_dns_packet (uint8_t *data, int data_len)
 {
     ASSERT(data_len >= 0)
